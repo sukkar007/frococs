@@ -7,8 +7,7 @@
   <title>Cocos Creator | FruitWheel</title>
 
   <!--http://www.html5rocks.com/en/mobile/mobifying/-->
-  <meta name="viewport"
-        content="width=device-width,user-scalable=no,initial-scale=1,minimum-scale=1,maximum-scale=1,minimal-ui=true"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover"/>
 
   <!--https://developer.apple.com/library/safari/documentation/AppleApplications/Reference/SafariHTMLRef/Articles/MetaTags.html-->
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -35,6 +34,43 @@
   <!--<link rel="apple-touch-icon-precomposed" href=".png" />-->
 
   <link rel="stylesheet" type="text/css" href="style.css"/>
+
+  <!-- معالج الأخطاء العام -->
+  <script>
+    // تسجيل معلومات الجهاز
+    console.log('📱 معلومات الجهاز:', {
+        userAgent: navigator.userAgent,
+        platform: navigator.platform,
+        language: navigator.language,
+        onLine: navigator.onLine,
+        connection: navigator.connection ? {
+            effectiveType: navigator.connection.effectiveType,
+            downlink: navigator.connection.downlink,
+            rtt: navigator.connection.rtt
+        } : 'غير متاح'
+    });
+
+    // معالج الأخطاء العام
+    window.addEventListener('error', function(event) {
+        console.error('❌ خطأ عام:', event.error);
+        console.error('📍 الملف:', event.filename);
+        console.error('📍 السطر:', event.lineno);
+    });
+
+    // معالج الأخطاء غير المعالجة في Promise
+    window.addEventListener('unhandledrejection', function(event) {
+        console.error('❌ رفع Promise غير معالج:', event.reason);
+    });
+
+    // تتبع حالة الاتصال
+    window.addEventListener('online', function() {
+        console.log('✅ الاتصال بالإنترنت متاح');
+    });
+
+    window.addEventListener('offline', function() {
+        console.log('❌ الاتصال بالإنترنت غير متاح');
+    });
+  </script>
 
 </head>
 <body>
