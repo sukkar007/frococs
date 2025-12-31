@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <script src="https://npmcdn.com/parse/dist/parse.min.js"></script>
+  <meta charset="utf-8">
+
+  <title>Cocos Creator | FruitWheel</title>
+
+  <!--http://www.html5rocks.com/en/mobile/mobifying/-->
+  <meta name="viewport"
+        content="width=device-width,user-scalable=no,initial-scale=1,minimum-scale=1,maximum-scale=1,minimal-ui=true"/>
+
+  <!--https://developer.apple.com/library/safari/documentation/AppleApplications/Reference/SafariHTMLRef/Articles/MetaTags.html-->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="format-detection" content="telephone=no">
+
+  <!-- force webkit on 360 -->
+  <meta name="renderer" content="webkit"/>
+  <meta name="force-rendering" content="webkit"/>
+  <!-- force edge on IE -->
+  <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1"/>
+  <meta name="msapplication-tap-highlight" content="no">
+
+  <!-- force full screen on some browser -->
+  <meta name="full-screen" content="yes"/>
+  <meta name="x5-fullscreen" content="true"/>
+  <meta name="360-fullscreen" content="true"/>
+
+  <!--fix fireball/issues/3568 -->
+  <!--<meta name="browsermode" content="application">-->
+  <meta name="x5-page-mode" content="app">
+
+  <!--<link rel="apple-touch-icon" href=".png" />-->
+  <!--<link rel="apple-touch-icon-precomposed" href=".png" />-->
+
+  <link rel="stylesheet" type="text/css" href="style.css"/>
+
+</head>
+<body>
+  <div id="GameDiv" cc_exact_fit_screen="true">
+      <div id="Cocos3dGameContainer">
+        <canvas id="GameCanvas" oncontextmenu="event.preventDefault()" tabindex="99"></canvas>
+      </div>
+    </div>
+  
+<!-- Polyfills bundle. -->
+<script src="src/polyfills.bundle.js" charset="utf-8"> </script>
+
+<!-- SystemJS support. -->
+<script src="src/system.bundle.js" charset="utf-8"> </script>
+
+<!-- Import map -->
+<script src="src/import-map.json" type="systemjs-importmap" charset="utf-8"> </script>
+
+<script>
+// FruitWheel Mock Server - Complete Game Loop with Protobuf
+(function() {
+    var OriginalWebSocket = window.WebSocket;
+    
+    // Game configuration
+    var BET_TIME = 15; // seconds for betting
+    var SPIN_TIME = 5; // seconds for spinning
+    var RESULT_TIME = 3; // seconds to show result
+    var FRUIT_RATES = [2, 5, 10, 20, 50]; // rates for each fruit slot
+    
+    // Game state
+    var gameState = {
+        stage: 1,
+        roundId: '',
+        countdown: BET_TIME,
+        result: 0,
+        userCoin: 10000,
+        todayWin: 500,
+        history: [],
+        bets: [0, 0, 0, 0, 0],
+        totalBets: [0, 0, 0, 0, 0]
+    };
+    
+    // Generate initial history
+    for (var i = 0; i < 10; i++) {
+        gameState.history.push(Math.floor(Math.random() * 8));
+    }
+    
+    // Helper to pack message with name
+    function packMessage(msgName, encodedData) {
+        var msgNameBytes = new Uint8Array(msgName.length);
+        for (var i = 0; i < msgName.length; i++) {
+            msgNameBytes[i] = msgName.charCodeAt(i);
+        }
+        
+        var lenBytes = new Uint8Array(2);
+        lenBytes[0] = (msgName.length >> 8) & 0xFF;
+        lenBytes[1] = msgName.length & 0xFF;
+        
+        var totalLen = 2 + msgNameBytes.length + encodedData.length;
+        var packet = new Uint8Array(totalLen);
+        packet.set(lenBytes, 0);
+        packet.set(msgNameBytes, 2);
+        packet.set(encodedData, 2 + msgNameBytes.length);
+        
+        return packet.buffer;
+    }
+    
+    // Helper to unpack message
+    function unpackMessage(buffer) {
+        try {
+            var uint8 = new Uint8Array(buffer);
+            var msgNameLen = (uint8[0] << 8) | uint8[1];
+            var msgName = '';
+            for (var i = 0; i < msgNameLen; i++) {
+                msgName += String.fromCharCode(uint8[2 + i]);
+            }
+            var data = uint8.slice(2 + msgNameLen);
+            return { name: msgName, data: data };
+        } catch (e) {
+            return null;
+        }
+    }
+    
+    function MockWebSocket(url, protocols) {
+        console.log('MockWebSocket: Connecting to', url);
+        
+        var self = this;
+        this.url = url;
+        this.readyState = 0;
+        this.protocol = '';
+        this.extensions = '';
+        this.bufferedAmount = 0;
+        this.binaryType = 'arraybuffer';
+        
+        this.onopen = null;
+        this.onclose = null;
+        this.onmessage = null;
+        this.onerror = null;
+        
+        this._pb = null;
+        this._gameLoopStarted = false;
+        this._countdownTimer = null;
+        this._stageTimer = null;
+        
+        // Connect after a short delay
+        setTimeout(function() {
+            self.readyState = 1;
+            console.log('MockWebSocket: Connected');
+            
+            if (self.onopen) {
+                self.onopen({ type: 'open' });
+            }
+            
+            // Wait for pb to be available, then start game
+            self._waitForPb();
+        }, 100);
+    }
+    
+    MockWebSocket.prototype._waitForPb = function() {
+        var self = this;
+        
+        var checkPb = function() {
+            var protoMod = System.get('chunks:///_virtual/proto.js');
+            if (protoMod && protoMod.default && protoMod.default.pb) {
+                self._pb = protoMod.default.pb;
+                console.log('MockWebSocket: Protobuf loaded');
+                
+                // Update user coin in mius
+                setTimeout(function() {
+                    var miusMod = System.get('chunks:///_virtual/mius.ts');
+                    if (miusMod && miusMod.mius) {
+                        miusMod.mius.user.coin = gameState.userCoin;
+                    }
+                }, 100);
+                
+                // Send initial game info after a short delay
+                setTimeout(function() {
+                    self._sendGameInfo();
+                    setTimeout(function() {
+                        self._startGameLoop();
+                    }, 500);
+                }, 300);
+            } else {
+                setTimeout(checkPb, 100);
+            }
+        };
+        
+        checkPb();
+    };
+    
+    MockWebSocket.prototype._sendMessage = function(msgName, messageObj) {
+        var self = this;
+        if (this.readyState !== 1 || !this._pb) return;
+        
+        try {
+            var msgType = this._pb[msgName.replace('pb.', '')];
+            if (!msgType) {
+                console.log('MockWebSocket: Unknown message type', msgName);
+                return;
+            }
+            
+            var encoded = msgType.encode(messageObj).finish();
+            var packet = packMessage(msgName, encoded);
+            
+            console.log('MockWebSocket: Sending', msgName);
+            
+            setTimeout(function() {
+                if (self.onmessage) {
+                    self.onmessage({ data: packet, type: 'message' });
+                }
+            }, 10);
+        } catch (e) {
+            console.log('MockWebSocket: Error sending message', e);
+        }
+    };
+    
+    MockWebSocket.prototype._sendGameInfo = function() {
+        var pb = this._pb;
+        if (!pb) return;
+        
+        var slots = [];
+        for (var i = 0; i < 5; i++) {
+            slots.push(pb.FruitwheelBetSlotInfo.create({
+                id: i,
+                totalBet: gameState.totalBets[i],
+                selfBet: gameState.bets[i]
+            }));
+        }
+        
+        var gameInfo = pb.FruitwheelGameInfoS2C.create({
+            code: 0,
+            stage: gameState.stage,
+            roundId: gameState.roundId,
+            leftSeconds: gameState.countdown,
+            coin: gameState.userCoin,
+            todayWin: gameState.todayWin,
+            historys: gameState.history.slice(0, 10),
+            slots: slots
+        });
+        
+        this._sendMessage('pb.FruitwheelGameInfoS2C', gameInfo);
+    };
+    
+    MockWebSocket.prototype._startGameLoop = function() {
+        var self = this;
+        if (this._gameLoopStarted) return;
+        this._gameLoopStarted = true;
+        
+        var pb = this._pb;
+        
+        function startBettingPhase() {
+            if (self.readyState !== 1) return;
+            
+            console.log('MockWebSocket: Starting betting phase');
+            
+            // Reset for new round
+            gameState.stage = pb.FruitwheelStage.FRUITWHEEL_STAGE_BET;
+            gameState.roundId = Date.now() + '-' + Math.floor(Math.random() * 9999);
+            gameState.countdown = BET_TIME;
+            gameState.bets = [0, 0, 0, 0, 0];
+            gameState.totalBets = [0, 0, 0, 0, 0];
+            
+            // Send stage change
+            self._sendMessage('pb.FruitwheelGameStageS2A', pb.FruitwheelGameStageS2A.create({
+                stage: gameState.stage,
+                roundId: gameState.roundId,
+                leftSeconds: gameState.countdown
+            }));
+            
+            // Countdown timer
+            var count = BET_TIME;
+            if (self._countdownTimer) clearInterval(self._countdownTimer);
+            
+            self._countdownTimer = setInterval(function() {
+                if (self.readyState !== 1) {
+                    clearInterval(self._countdownTimer);
+                    return;
+                }
+                
+                count--;
+                gameState.countdown = count;
+                
+                if (count <= 0) {
+                    clearInterval(self._countdownTimer);
+                    startPreparePhase();
+                }
+            }, 1000);
+        }
+        
+        function startPreparePhase() {
+            if (self.readyState !== 1) return;
+            
+            console.log('MockWebSocket: Starting prepare phase');
+            
+            gameState.stage = pb.FruitwheelStage.FRUITWHEEL_STAGE_PREPARE;
+            
+            self._sendMessage('pb.FruitwheelGameStageS2A', pb.FruitwheelGameStageS2A.create({
+                stage: gameState.stage,
+                roundId: gameState.roundId
+            }));
+            
+            // After spin time, show result
+            self._stageTimer = setTimeout(function() {
+                startResultPhase();
+            }, SPIN_TIME * 1000);
+        }
+        
+        function startResultPhase() {
+            if (self.readyState !== 1) return;
+            
+            console.log('MockWebSocket: Starting result phase');
+            
+            // Generate random result
+            var resultId = Math.floor(Math.random() * 8);
+            gameState.result = resultId;
+            
+            // Add to history
+            gameState.history.unshift(resultId);
+            if (gameState.history.length > 20) {
+                gameState.history.pop();
+            }
+            
+            // Calculate winnings
+            var betSlotId = Math.floor(resultId / 2);
+            var winAmount = gameState.bets[betSlotId] * FRUIT_RATES[betSlotId];
+            gameState.userCoin += winAmount;
+            gameState.todayWin += winAmount;
+            
+            // Update user coin in mius
+            var miusMod = System.get('chunks:///_virtual/mius.ts');
+            if (miusMod && miusMod.mius) {
+                miusMod.mius.user.coin = gameState.userCoin;
+            }
+            
+            // Create reward players list
+            var players = [];
+            if (winAmount > 0) {
+                players.push(pb.FruitwheelGameRewardPlayer.create({
+                    uid: 1001,
+                    reward: winAmount,
+                    nickname: 'Player',
+                    avatar: ''
+                }));
+            }
+            
+            // Send result
+            self._sendMessage('pb.FruitwheelGameResultS2A', pb.FruitwheelGameResultS2A.create({
+                roundId: gameState.roundId,
+                winId: resultId,
+                players: players
+            }));
+            
+            // Send finish stage
+            gameState.stage = pb.FruitwheelStage.FRUITWHEEL_STAGE_FINISH;
+            self._sendMessage('pb.FruitwheelGameStageS2A', pb.FruitwheelGameStageS2A.create({
+                stage: gameState.stage,
+                roundId: gameState.roundId,
+                resultId: resultId
+            }));
+            
+            // After result time, go to none then start new round
+            self._stageTimer = setTimeout(function() {
+                startNonePhase();
+            }, RESULT_TIME * 1000);
+        }
+        
+        function startNonePhase() {
+            if (self.readyState !== 1) return;
+            
+            console.log('MockWebSocket: Starting none phase');
+            
+            gameState.stage = pb.FruitwheelStage.FRUITWHEEL_STAGE_NONE;
+            
+            self._sendMessage('pb.FruitwheelGameStageS2A', pb.FruitwheelGameStageS2A.create({
+                stage: gameState.stage,
+                roundId: gameState.roundId
+            }));
+            
+            // Start new betting phase after a short delay
+            self._stageTimer = setTimeout(function() {
+                startBettingPhase();
+            }, 2000);
+        }
+        
+        // Start the first betting phase
+        startBettingPhase();
+    };
+    
+    MockWebSocket.prototype.send = function(data) {
+        var self = this;
+        var pb = this._pb;
+        
+        if (!pb) {
+            console.log('MockWebSocket: pb not ready yet');
+            return;
+        }
+        
+        if (data instanceof ArrayBuffer || data instanceof Uint8Array) {
+            var buffer = data instanceof Uint8Array ? data.buffer : data;
+            var msg = unpackMessage(buffer);
+            
+            if (msg) {
+                console.log('MockWebSocket: Received', msg.name);
+                this._handleMessage(msg.name, msg.data);
+            }
+        }
+    };
+    
+    MockWebSocket.prototype._handleMessage = function(msgName, data) {
+        var pb = this._pb;
+        
+        if (msgName.includes('GameInfoC2S')) {
+            this._sendGameInfo();
+        } else if (msgName.includes('GameBetC2S')) {
+            try {
+                var betMsg = pb.FruitwheelGameBetC2S.decode(data);
+                var betId = betMsg.id || 0;
+                var betAmount = betMsg.bet || 10;
+                
+                console.log('MockWebSocket: Bet received', betId, betAmount);
+                
+                if (gameState.userCoin >= betAmount && gameState.stage === pb.FruitwheelStage.FRUITWHEEL_STAGE_BET) {
+                    gameState.userCoin -= betAmount;
+                    gameState.bets[betId] += betAmount;
+                    gameState.totalBets[betId] += betAmount;
+                    
+                    // Update user coin in mius
+                    var miusMod = System.get('chunks:///_virtual/mius.ts');
+                    if (miusMod && miusMod.mius) {
+                        miusMod.mius.user.coin = gameState.userCoin;
+                    }
+                    
+                    this._sendMessage('pb.FruitwheelGameBetS2C', pb.FruitwheelGameBetS2C.create({
+                        code: 0,
+                        roundId: gameState.roundId,
+                        id: betId,
+                        bet: betAmount,
+                        coin: gameState.userCoin
+                    }));
+                    
+                    this._sendMessage('pb.FruitwheelGameBetS2A', pb.FruitwheelGameBetS2A.create({
+                        uid: 1001,
+                        id: betId,
+                        bet: betAmount
+                    }));
+                } else {
+                    this._sendMessage('pb.FruitwheelGameBetS2C', pb.FruitwheelGameBetS2C.create({
+                        code: gameState.userCoin < betAmount ? 2 : 1,
+                        roundId: gameState.roundId,
+                        id: betId,
+                        bet: 0,
+                        coin: gameState.userCoin
+                    }));
+                }
+            } catch (e) {
+                console.log('MockWebSocket: Error parsing bet', e);
+            }
+        } else if (msgName.includes('SelfRecord')) {
+            if (pb.FruitwheelGameSelfRecordS2C) {
+                this._sendMessage('pb.FruitwheelGameSelfRecordS2C', pb.FruitwheelGameSelfRecordS2C.create({
+                    code: 0,
+                    records: []
+                }));
+            }
+        } else if (msgName.includes('WinRank')) {
+            if (pb.FruitwheelGetWinRankS2C) {
+                this._sendMessage('pb.FruitwheelGetWinRankS2C', pb.FruitwheelGetWinRankS2C.create({
+                    code: 0,
+                    ranks: []
+                }));
+            }
+        } else if (msgName.includes('HBC2S') || msgName.includes('Heartbeat')) {
+            if (pb.HBS2C) {
+                this._sendMessage('pb.HBS2C', pb.HBS2C.create({
+                    time: Math.floor(Date.now() / 1000)
+                }));
+            }
+        }
+    };
+    
+    MockWebSocket.prototype.close = function(code, reason) {
+        var self = this;
+        this.readyState = 2;
+        
+        if (this._countdownTimer) clearInterval(this._countdownTimer);
+        if (this._stageTimer) clearTimeout(this._stageTimer);
+        
+        setTimeout(function() {
+            self.readyState = 3;
+            if (self.onclose) {
+                self.onclose({ code: code || 1000, reason: reason || '', wasClean: true });
+            }
+        }, 0);
+    };
+    
+    MockWebSocket.prototype.addEventListener = function(type, listener) {
+        this['on' + type] = listener;
+    };
+    
+    MockWebSocket.prototype.removeEventListener = function(type, listener) {
+        if (this['on' + type] === listener) {
+            this['on' + type] = null;
+        }
+    };
+    
+    MockWebSocket.CONNECTING = 0;
+    MockWebSocket.OPEN = 1;
+    MockWebSocket.CLOSING = 2;
+    MockWebSocket.CLOSED = 3;
+    
+    // Replace WebSocket for fruitwheel connections
+    window.WebSocket = function(url, protocols) {
+        if (url && url.includes('/fruitwheel')) {
+            console.log('Using MockWebSocket for FruitWheel');
+            return new MockWebSocket(url, protocols);
+        }
+        return new OriginalWebSocket(url, protocols);
+    };
+    window.WebSocket.prototype = OriginalWebSocket.prototype;
+    window.WebSocket.CONNECTING = 0;
+    window.WebSocket.OPEN = 1;
+    window.WebSocket.CLOSING = 2;
+    window.WebSocket.CLOSED = 3;
+    
+    console.log('FruitWheel Mock Server v2.0 initialized');
+})();
+</script>
+
+<script src="./parse-adapter.js"></script>
+<script>
+    System.import('./index.js').catch(function(err) { console.error(err); })
+</script>
+
+</body>
+</html>
