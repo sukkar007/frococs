@@ -1,16 +1,13 @@
-// ============================================
-// FruitWheel Parse Adapter - النسخة المحسنة
-// ============================================
-
 (function() {
     console.log('🎮 [FruitWheel Adapter] بدء التهيئة...');
     
-    // تسجيل البداية
     window.FruitWheelAdapterStatus = {
         initialized: false,
         timestamp: new Date().toISOString(),
         errors: [],
-        logs: []
+        logs: [],
+        maxRetries: 5,
+        currentRetry: 0
     };
 
     const urlParams = new URLSearchParams(window.location.search);
@@ -24,7 +21,7 @@
         serverURL: serverURL
     });
 
-    // تهيئة Parse مع معالجة الأخطاء الشاملة
+    // تهيئة Parse مع معالجة الأخطاء
     if (window.Parse) {
         try {
             if (appId) {
@@ -34,6 +31,7 @@
                 window.FruitWheelAdapterStatus.parseInitialized = true;
             } else {
                 console.warn('⚠️ [FruitWheel Adapter] لم يتم توفير appId');
+                window.FruitWheelAdapterStatus.errors.push('No appId provided');
             }
             
             if (sessionToken) {
@@ -69,12 +67,21 @@
         this._retryCount = 0;
         this._maxRetries = 5;
         this.url = url;
+        this._initTimeout = null;
+        this._pbTimeout = null;
 
-        // تسجيل في الحالة العامة
         window.FruitWheelAdapterStatus.websocketCreated = true;
         window.FruitWheelAdapterStatus.websocketUrl = url;
 
-        // زيادة التأخير للهواتف البطيئة
+        // تعيين timeout للتهيئة
+        this._initTimeout = setTimeout(() => {
+            console.error('❌ [FruitWebSocket] timeout في التهيئة');
+            window.FruitWheelAdapterStatus.errors.push('Init timeout');
+            if (this.onerror) {
+                this.onerror({ type: 'error', message: 'Init timeout' });
+            }
+        }, 10000); // 10 ثواني
+
         setTimeout(() => this._init(), 500);
     }
 
@@ -94,11 +101,38 @@
         
         const checkPb = () => {
             try {
-                const protoMod = System.get('chunks:///_virtual/proto.js');
+                // محاولة الحصول على Protobuf من عدة مسارات
+                let protoMod = null;
+                
+                // المسار الأول
+                if (typeof System !== 'undefined' && System.get) {
+                    try {
+                        protoMod = System.get('chunks:///_virtual/proto.js');
+                    } catch (e) {
+                        console.log('⚠️ [FruitWebSocket] المسار الأول فشل:', e.message);
+                    }
+                }
+                
+                // المسار الثاني - البحث في window
+                if (!protoMod && window.pb) {
+                    protoMod = { default: { pb: window.pb } };
+                }
+                
+                // المسار الثالث - البحث في global
+                if (!protoMod && typeof global !== 'undefined' && global.pb) {
+                    protoMod = { default: { pb: global.pb } };
+                }
+
                 if (protoMod && protoMod.default && protoMod.default.pb) {
                     this._pb = protoMod.default.pb;
                     console.log('✅ [FruitWebSocket] تم تحميل Protobuf بنجاح');
                     window.FruitWheelAdapterStatus.protobufLoaded = true;
+                    
+                    // إلغاء timeout التهيئة
+                    if (this._initTimeout) {
+                        clearTimeout(this._initTimeout);
+                    }
+                    
                     this._startSync();
                 } else {
                     if (this._retryCount < this._maxRetries) {
@@ -107,10 +141,20 @@
                         setTimeout(checkPb, 1000);
                     } else {
                         console.error('❌ [FruitWebSocket] فشل تحميل Protobuf بعد عدة محاولات');
-                        window.FruitWheelAdapterStatus.errors.push('Protobuf loading failed');
+                        window.FruitWheelAdapterStatus.errors.push('Protobuf loading failed after retries');
+                        
+                        // إلغاء timeout التهيئة
+                        if (this._initTimeout) {
+                            clearTimeout(this._initTimeout);
+                        }
+                        
                         if (this.onerror) {
                             this.onerror({ type: 'error', message: 'فشل تحميل Protobuf' });
                         }
+                        
+                        // محاولة المتابعة بدون Protobuf
+                        console.log('⚠️ [FruitWebSocket] محاولة المتابعة بدون Protobuf');
+                        this._startSync();
                     }
                 }
             } catch (e) {
@@ -131,19 +175,23 @@
         const sync = async () => {
             if (this.readyState !== 1) return;
             try {
-                // التحقق من توفر Parse قبل الاستدعاء
                 if (!window.Parse || !Parse.Cloud) {
                     console.warn('⚠️ [FruitWebSocket] Parse غير متاح، سيتم إعادة المحاولة...');
                     return;
                 }
 
                 console.log('📤 [FruitWebSocket] استدعاء fruit_game_info...');
-                const res = await Parse.Cloud.run('fruit_game_info');
+                const res = await Promise.race([
+                    Parse.Cloud.run('fruit_game_info'),
+                    new Promise((_, reject) => 
+                        setTimeout(() => reject(new Error('Timeout')), 5000)
+                    )
+                ]);
                 
                 if (res && res.code === 0) {
                     console.log('✅ [FruitWebSocket] استقبال بيانات اللعبة بنجاح');
                     this._handleData(res.data);
-                    this._retryCount = 0; // إعادة تعيين عدد المحاولات عند النجاح
+                    this._retryCount = 0;
                 } else {
                     console.warn('⚠️ [FruitWebSocket] استجابة غير صحيحة:', res);
                     window.FruitWheelAdapterStatus.errors.push('Invalid response: ' + JSON.stringify(res));
@@ -153,7 +201,6 @@
                 window.FruitWheelAdapterStatus.errors.push('Sync error: ' + e.message);
             }
             
-            // إعادة المحاولة بعد 2 ثانية
             if (this.readyState === 1) {
                 this._syncInterval = setTimeout(sync, 2000);
             }
@@ -171,7 +218,6 @@
             const pb = this._pb;
             console.log('📨 [FruitWebSocket] معالجة بيانات اللعبة');
 
-            // 1. إرسال حالة اللعبة والوقت
             this._sendToGame('pb.FruitwheelGameInfoS2C', pb.FruitwheelGameInfoS2C.create({
                 stage: data.stage || 0,
                 roundId: data.roundId || '',
@@ -182,7 +228,6 @@
                 totalBet: data.totalBet || []
             }));
 
-            // 2. إذا تغيرت المرحلة إلى FINISH، نرسل النتيجة
             if (data.stage === 3 && this._currentRoundId !== data.roundId) {
                 this._currentRoundId = data.roundId;
                 console.log('🎉 [FruitWebSocket] إرسال نتيجة اللعبة');
@@ -215,10 +260,15 @@
                     return;
                 }
 
-                const res = await Parse.Cloud.run('fruit_game_bet', {
-                    fruitId: betData.id,
-                    amount: betData.bet
-                });
+                const res = await Promise.race([
+                    Parse.Cloud.run('fruit_game_bet', {
+                        fruitId: betData.id,
+                        amount: betData.bet
+                    }),
+                    new Promise((_, reject) => 
+                        setTimeout(() => reject(new Error('Timeout')), 5000)
+                    )
+                ]);
                 
                 if (res && res.code === 0) {
                     console.log('✅ [FruitWebSocket] تم معالجة الرهان بنجاح');
@@ -275,15 +325,16 @@
     FruitWebSocket.prototype.close = function() {
         console.log('🔌 [FruitWebSocket] إغلاق الاتصال');
         this.readyState = 3;
-        if (this._syncInterval) {
-            clearTimeout(this._syncInterval);
-        }
+        
+        if (this._initTimeout) clearTimeout(this._initTimeout);
+        if (this._pbTimeout) clearTimeout(this._pbTimeout);
+        if (this._syncInterval) clearTimeout(this._syncInterval);
+        
         if (this.onclose) {
             this.onclose({ code: 1000, reason: 'مغلق' });
         }
     };
 
-    // استبدال WebSocket
     window.WebSocket = function(url) {
         if (url && url.includes('/fruitwheel')) {
             console.log('🎮 [WebSocket Override] استخدام FruitWebSocket لـ:', url);
@@ -292,17 +343,14 @@
         return new OriginalWebSocket(url);
     };
 
-    // نسخ الثوابت
     window.WebSocket.CONNECTING = 0;
     window.WebSocket.OPEN = 1;
     window.WebSocket.CLOSING = 2;
     window.WebSocket.CLOSED = 3;
 
-    // تصدير الدوال والفئات للاختبار
     window.FruitWebSocket = FruitWebSocket;
     window.OriginalWebSocket = OriginalWebSocket;
 
-    // تسجيل النهاية
     window.FruitWheelAdapterStatus.initialized = true;
     window.FruitWheelAdapterStatus.completedAt = new Date().toISOString();
 
