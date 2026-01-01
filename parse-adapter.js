@@ -1,6 +1,6 @@
 /**
  * Parse Adapter for Fruit Wheel Game
- * يتعامل مع الاتصال بـ Parse Server والمصادقة
+ * الطريقة الصحيحة: استخدام request.user مباشرة (بدون محاولة المصادقة اليدوية)
  */
 
 class FruitWheelAdapter {
@@ -12,8 +12,6 @@ class FruitWheelAdapter {
     this._retryCount = 0;
     this._maxRetries = 5;
     this._initTimeout = null;
-    this._authenticated = false;
-    this._sessionToken = null;
 
     // تسجيل الحالة في window
     window.FruitWheelAdapterStatus = {
@@ -21,7 +19,6 @@ class FruitWheelAdapter {
       parseInitialized: false,
       websocketCreated: false,
       protobufLoaded: false,
-      authenticated: false,
       errors: [],
       warnings: [],
       logs: [],
@@ -60,17 +57,15 @@ class FruitWheelAdapter {
     try {
       const urlParams = new URLSearchParams(window.location.search);
       
-      this._sessionToken = urlParams.get('sessionToken');
       const appId = urlParams.get('appId');
       const serverURL = urlParams.get('serverURL');
 
       console.log('📋 [FruitWheel Adapter] معاملات الـ URL:');
-      console.log('  🔑 Session Token:', this._sessionToken ? `✅ موجود (${this._sessionToken.substring(0, 20)}...)` : '❌ غير موجود');
       console.log('  📱 App ID:', appId ? `✅ ${appId}` : '❌ غير موجود');
       console.log('  🔗 Server URL:', serverURL ? `✅ ${serverURL}` : '❌ غير موجود');
 
-      if (!this._sessionToken || !appId || !serverURL) {
-        const error = 'معاملات الـ URL ناقصة';
+      if (!appId || !serverURL) {
+        const error = 'معاملات الـ URL ناقصة (appId أو serverURL)';
         console.error('❌ [FruitWheel Adapter]', error);
         window.FruitWheelAdapterStatus.errors.push(error);
         return false;
@@ -79,8 +74,8 @@ class FruitWheelAdapter {
       // حفظ معاملات الـ URL
       window.parseAppId = appId;
       window.parseServerURL = serverURL;
-      window.parseSessionToken = this._sessionToken;
 
+      console.log('✅ [FruitWheel Adapter] تم الحصول على معاملات الـ URL بنجاح');
       return true;
     } catch (e) {
       console.error('❌ [FruitWheel Adapter] خطأ في الحصول على معاملات الـ URL:', e);
@@ -120,9 +115,8 @@ class FruitWheelAdapter {
     try {
       const appId = window.parseAppId;
       const serverURL = window.parseServerURL;
-      const sessionToken = window.parseSessionToken;
 
-      if (!appId || !serverURL || !sessionToken) {
+      if (!appId || !serverURL) {
         throw new Error('معاملات Parse ناقصة');
       }
 
@@ -133,72 +127,17 @@ class FruitWheelAdapter {
       Parse.serverURL = serverURL;
 
       console.log('✅ [FruitWheel Adapter] تم تهيئة Parse بنجاح');
+      console.log('  📱 App ID:', appId);
+      console.log('  🔗 Server URL:', serverURL);
+      
       window.FruitWheelAdapterStatus.parseInitialized = true;
 
-      // المصادقة باستخدام sessionToken
-      this._authenticateWithSessionToken(sessionToken);
+      // ✅ لا نحتاج إلى محاولة المصادقة اليدوية!
+      // Parse يتعامل مع sessionToken تلقائياً من الرؤوس
+      console.log('✅ [FruitWheel Adapter] Parse جاهز للعمل');
+      console.log('⚠️ ملاحظة: المصادقة تتم تلقائياً عبر sessionToken في الرؤوس');
     } catch (e) {
       console.error('❌ [FruitWheel Adapter] خطأ في تهيئة Parse:', e);
-      window.FruitWheelAdapterStatus.errors.push(e.message);
-    }
-  }
-
-  /**
-   * المصادقة باستخدام sessionToken
-   */
-  _authenticateWithSessionToken(sessionToken) {
-    try {
-      console.log('🔐 [FruitWheel Adapter] محاولة المصادقة باستخدام sessionToken...');
-
-      // طريقة 1: استخدام Parse.User.become
-      Parse.User.become(sessionToken)
-        .then((user) => {
-          console.log('✅ [FruitWheel Adapter] تم المصادقة بنجاح');
-          console.log('  👤 اسم المستخدم:', user.get('username'));
-          console.log('  📧 البريد الإلكتروني:', user.get('email'));
-          
-          window.FruitWheelAdapterStatus.authenticated = true;
-          this._authenticated = true;
-          
-          // تنفيذ callback إذا كان موجوداً
-          if (typeof window.onParseAuthenticated === 'function') {
-            window.onParseAuthenticated(user);
-          }
-        })
-        .catch((error) => {
-          console.error('❌ [FruitWheel Adapter] فشل المصادقة:', error);
-          window.FruitWheelAdapterStatus.errors.push(error.message);
-          
-          // محاولة بديلة: تعيين sessionToken مباشرة
-          this._setSessionTokenDirectly(sessionToken);
-        });
-    } catch (e) {
-      console.error('❌ [FruitWheel Adapter] خطأ في المصادقة:', e);
-      window.FruitWheelAdapterStatus.errors.push(e.message);
-    }
-  }
-
-  /**
-   * تعيين sessionToken مباشرة
-   */
-  _setSessionTokenDirectly(sessionToken) {
-    try {
-      console.log('🔧 [FruitWheel Adapter] محاولة تعيين sessionToken مباشرة...');
-
-      // إنشاء مستخدم جديد وتعيين sessionToken
-      const user = new Parse.User();
-      user.sessionToken = sessionToken;
-
-      // حفظ في localStorage
-      localStorage.setItem('Parse/com.flamingolive.hus/currentUser', JSON.stringify({
-        sessionToken: sessionToken,
-      }));
-
-      console.log('✅ [FruitWheel Adapter] تم تعيين sessionToken');
-      window.FruitWheelAdapterStatus.authenticated = true;
-      this._authenticated = true;
-    } catch (e) {
-      console.error('❌ [FruitWheel Adapter] خطأ في تعيين sessionToken:', e);
       window.FruitWheelAdapterStatus.errors.push(e.message);
     }
   }
@@ -213,7 +152,6 @@ class FruitWheelAdapter {
       if (typeof dcodeIO !== 'undefined' && typeof dcodeIO.ByteBuffer !== 'undefined') {
         console.log('✅ [FruitWheel Adapter] Protobuf محمل بنجاح');
         window.FruitWheelAdapterStatus.protobufLoaded = true;
-        this._protobufLoaded = true;
         return;
       }
 
@@ -254,7 +192,7 @@ class FruitWheelAdapter {
           });
 
           this.addEventListener('message', (event) => {
-            console.log('📨 [FruitWebSocket] استقبال رسالة:', event.data.substring(0, 100));
+            console.log('📨 [FruitWebSocket] استقبال رسالة');
             
             if (typeof window.onFruitWebSocketMessage === 'function') {
               window.onFruitWebSocketMessage(event);
@@ -263,7 +201,7 @@ class FruitWheelAdapter {
 
           this.addEventListener('error', (event) => {
             console.error('❌ [FruitWebSocket] خطأ في الاتصال:', event);
-            window.FruitWheelAdapterStatus.errors.push('WebSocket error: ' + event.message);
+            window.FruitWheelAdapterStatus.errors.push('WebSocket error');
             
             if (typeof window.onFruitWebSocketError === 'function') {
               window.onFruitWebSocketError(event);
@@ -302,7 +240,6 @@ class FruitWheelAdapter {
     console.log('📊 الحالة:', {
       initialized: window.FruitWheelAdapterStatus.initialized,
       parseInitialized: window.FruitWheelAdapterStatus.parseInitialized,
-      authenticated: window.FruitWheelAdapterStatus.authenticated,
       websocketCreated: window.FruitWheelAdapterStatus.websocketCreated,
       protobufLoaded: window.FruitWheelAdapterStatus.protobufLoaded,
       errors: window.FruitWheelAdapterStatus.errors,
